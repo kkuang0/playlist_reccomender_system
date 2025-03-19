@@ -1,40 +1,79 @@
-# Music Playlist Recommender System
+# AI Playlist Generator
 
-A modern web application that generates personalized music playlists based on:
-- Text prompts describing your mood or preferences
-- Image uploads that capture the desired atmosphere
-- Musical preferences and genres
+An AI-powered music playlist generator that creates personalized playlists based on text descriptions or images.
 
 ## Features
-- Natural language processing for understanding user mood and preferences
-- Image analysis for mood-based recommendations
-- Integration with Spotify API for music data
-- Modern, responsive web interface
-- Real-time playlist generation
+
+- Generate music recommendations based on text descriptions
+- Analyze images to create mood-based playlists
+- Create and save playlists directly to Spotify
+- Preview tracks before adding them to playlists
+- Modern, responsive UI with drag-and-drop image upload
+
+## Prerequisites
+
+- Python 3.8 or higher
+- Node.js 14 or higher
+- Spotify Developer Account
+- Hugging Face Account
 
 ## Setup
 
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Set up environment variables:
-   - Create a `.env` file with your Spotify API credentials
-   - Add any additional API keys for image analysis
+1. Clone the repository:
+```bash
+git clone <repository-url>
+cd playlist_recommender_system
+```
 
-4. Run the application:
-   ```bash
-   python app.py
-   ```
+2. Set up environment variables:
+   - Copy `.env.example` to `.env`:
+     ```bash
+     cp .env.example .env
+     ```
+   - Update the `.env` file with your credentials:
+     - Get Spotify credentials from [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+     - Get Hugging Face token from [Hugging Face Settings](https://huggingface.co/settings/tokens)
 
-## Technologies Used
-- Python
-- Flask
-- Spotify Web API
-- OpenAI API (for text understanding)
-- React (for frontend)
-- TailwindCSS (for styling)
+3. Install Python dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+4. Install frontend dependencies:
+```bash
+cd frontend
+npm install
+```
+
+## Running the Application
+
+1. Start the Flask backend:
+```bash
+python app.py
+```
+
+2. In a new terminal, start the React frontend:
+```bash
+cd frontend
+npm start
+```
+
+3. Open your browser and navigate to `http://localhost:3000`
+
+## Security Notes
+
+- Never commit your `.env` file or any files containing sensitive information
+- Keep your API keys and tokens secure
+- The `.env` file is already included in `.gitignore` to prevent accidental commits
+- For production deployment, use secure environment variable management systems
+
+## Contributing
+
+1. Fork the repository
+2. Create a new branch for your feature
+3. Make your changes
+4. Submit a pull request
 
 ## License
-MIT License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
