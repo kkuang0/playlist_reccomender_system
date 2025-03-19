@@ -8,13 +8,22 @@ from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
 from PIL import Image
 import io
 import torch
-from huggingface_hub import login
+from huggingface_hub import login, InferenceClient
 import logging
 import socket
 import base64
+import random
+import requests
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -36,250 +45,426 @@ spotify_client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
 spotify_redirect_uri = os.getenv('SPOTIFY_REDIRECT_URI', 'http://localhost:3000/callback')
 
 if not spotify_client_id or not spotify_client_secret:
+    logger.error("Spotify credentials not found in environment variables")
     raise ValueError("Spotify credentials not found. Please check your .env file.")
 
+logger.info("Initializing Spotify client...")
 # Initialize Spotify client for app-only operations
 spotify = spotipy.Spotify(client_credentials_manager=SpotifyClientCredentials(
     client_id=spotify_client_id,
     client_secret=spotify_client_secret
 ))
 
-# Initialize Spotify OAuth
+# Initialize Hugging Face client
+huggingface_token = os.getenv('HUGGINGFACE_TOKEN')
+if not huggingface_token:
+    logger.error("Hugging Face token not found in environment variables")
+    raise ValueError("Hugging Face token not found. Please check your .env file.")
+
+logger.info("Initializing Hugging Face client...")
+login(token=huggingface_token)
+hf_client = InferenceClient(token=huggingface_token)
+
+# Initialize Spotify OAuth with additional scopes
+logger.info("Initializing Spotify OAuth...")
 sp_oauth = SpotifyOAuth(
     client_id=spotify_client_id,
     client_secret=spotify_client_secret,
     redirect_uri=spotify_redirect_uri,
-    scope='playlist-modify-public playlist-modify-private user-read-private user-read-email'
+    scope='playlist-modify-public playlist-modify-private user-read-private user-read-email user-read-recently-played user-top-read playlist-read-private playlist-read-collaborative'
 )
-
-# Login to Hugging Face
-huggingface_token = os.getenv('HUGGINGFACE_TOKEN')
-if not huggingface_token:
-    raise ValueError("Hugging Face token not found. Please check your .env file.")
-login(token=huggingface_token)
 
 logger.info("Initializing models...")
-# Initialize text analysis model (using a smaller model)
-text_model_name = "facebook/opt-125m"  # Using a smaller model
-text_tokenizer = AutoTokenizer.from_pretrained(text_model_name)
-text_model = AutoModelForCausalLM.from_pretrained(
-    text_model_name,
-    torch_dtype=torch.float16,
-    device_map="auto"
-)
-
-# Initialize image analysis model
-image_analyzer = pipeline("image-classification", model="microsoft/resnet-50")
+# Remove local model initialization since we're using the Inference API
 logger.info("Models initialized successfully")
 
-def analyze_text_prompt(prompt):
-    """Analyze text prompt using OPT model to extract mood and preferences"""
+def analyze_text_prompt(prompt, user_role=None):
+    """Analyze text prompt using the Llama model"""
     try:
-        system_prompt = "You are a music recommendation expert. Analyze the user's prompt and extract key musical elements, mood, and preferences. Be concise and focus on musical aspects. Limit your response to 2-3 sentences."
-        full_prompt = f"{system_prompt}\n\nUser: {prompt}\nAssistant:"
+        logger.info(f"Analyzing text prompt: {prompt[:50]}...")
+        logger.debug(f"User role: {user_role}")
         
-        inputs = text_tokenizer(full_prompt, return_tensors="pt").to(text_model.device)
-        outputs = text_model.generate(
-            **inputs,
-            max_new_tokens=50,  # Further reduced token length
+        # Enhanced system prompt with user role context
+        system_prompt = """You are a Gen Z Music Vibe Curator. 
+        Analyze user statements for emotional tone, energy level, and cultural references. 
+        Match these vibes to appropriate music genres and moods.
+        Decipher slang and cultural references. 
+        Extract keywords and phrases directly from the user's input.
+        
+        CRITICAL INSTRUCTION: You MUST detect and mention any artists, songs, or albums in the user's input.
+        Your response MUST start with "artist: [name]" if an artist is mentioned.
+        
+        Examples:
+        Input: "I like Drake's music"
+        Response: "artist: Drake Mood: Hip-hop, R&B, Melodic"
+        
+        Input: "I love Taylor Swift's songs"
+        Response: "artist: Taylor Swift Mood: Pop, Emotional, Storytelling"
+        
+        Input: "I want something like The Weeknd"
+        Response: "artist: The Weeknd Mood: R&B, Dark, Atmospheric"
+        
+        Format your response concisely and extract the mood, genre, key words and phrases.
+        """
+        
+        # Add user role context if available
+        role_context = "Gen Z brainrot music listener."
+        if user_role:
+            role_context = f"\nUser Role: {user_role}"
+        
+        # Format prompt for Mistral model
+        full_prompt = f"<s>[INST] {system_prompt}{role_context}\n\nInput: {prompt} [/INST]"
+        
+        logger.debug("Sending request to Hugging Face Inference API")
+        # Use Hugging Face Inference API with Mistral model
+        raw_response = hf_client.text_generation(
+            full_prompt,
+            model="mistralai/Mistral-7B-Instruct-v0.3",
+            max_new_tokens=50,
             temperature=0.7,
             top_p=0.95,
             do_sample=True,
-            pad_token_id=text_tokenizer.eos_token_id,
-            num_return_sequences=1,
-            early_stopping=True
+            return_full_text=False
         )
         
-        response = text_tokenizer.decode(outputs[0], skip_special_tokens=True)
-        # Extract only the model's response (after "Assistant:")
-        response = response.split("Assistant:")[-1].strip()
-        
         # Clean up the response
-        # Remove any repetitive phrases
-        response = response.split('\n')[0]  # Take only the first line
+        response = raw_response.split('\n')[0]  # Take only the first line
         response = response.replace('What kind of music recommendations do you recommend?', '')
         response = response.replace('What kinds of music recommendations do you recommend?', '')
-        response = response.replace('Assistant:', '')
+        
+        # Extract mentioned song, artist, or album
+        mentioned_entity = None
+        if 'artist:' in response.lower():
+            # Extract the mentioned entity
+            parts = response.lower().split('artist:')
+            if len(parts) > 1:
+                mentioned_entity = parts[1].strip().split()[0]  # Take first word after "artist:"
+                # Remove the entity from the mood description
+                response = parts[0].strip()
         
         # Limit the response length
         if len(response) > 100:
             response = response[:100] + "..."
             
-        return response.strip()
+        logger.info(f"Generated mood description: {response}")
+        if mentioned_entity:
+            logger.info(f"Detected mentioned entity: {mentioned_entity}")
+        
+        return {
+            'mood_description': response.strip(),
+            'raw_response': raw_response,
+            'full_prompt': full_prompt,
+            'mentioned_entity': mentioned_entity
+        }
     except Exception as e:
-        logger.error(f"Error in text analysis: {str(e)}")
+        logger.error(f"Error in text analysis: {str(e)}", exc_info=True)
         raise
 
 def analyze_image(image_data):
-    """Analyze image using ResNet-50 to extract mood and atmosphere"""
+    """Analyze image using Hugging Face Inference API"""
     try:
+        logger.info("Processing image analysis request")
         # Convert base64 to image
         image = Image.open(io.BytesIO(image_data))
         
-        # Get image classification results
-        results = image_analyzer(image)
-        
-        # Extract top 3 most relevant categories
-        top_categories = [result['label'] for result in results[:3]]
-        
-        # Create a prompt for the text model to interpret these categories
-        categories_prompt = f"Based on these image categories: {', '.join(top_categories)}, suggest appropriate music mood and style."
-        
-        # Use the text model to interpret the image categories
-        return analyze_text_prompt(categories_prompt)
-    except Exception as e:
-        logger.error(f"Error in image analysis: {str(e)}")
-        raise
-
-def get_spotify_recommendations(mood_description):
-    """Get music recommendations from Spotify based on mood description"""
-    try:
-        # Clean up the mood description for Spotify search
-        search_query = mood_description.replace('\n', ' ').strip()
-        if len(search_query) > 100:
-            search_query = search_query[:100]
-            
-        logger.info(f"Searching Spotify with query: {search_query}")
-        
-        # Search for tracks based on mood
-        results = spotify.search(q=search_query, type='track', limit=10)
-        tracks = results['tracks']['items']
-        
-        # Extract track information
-        recommendations = []
-        for track in tracks:
-            recommendations.append({
-                'name': track['name'],
-                'artist': track['artists'][0]['name'],
-                'album': track['album']['name'],
-                'preview_url': track['preview_url'],
-                'external_url': track['external_urls']['spotify']
-            })
-        
-        return recommendations
-    except Exception as e:
-        logger.error(f"Error getting Spotify recommendations: {str(e)}")
-        raise
-
-def create_spotify_playlist(user_token, mood_description, tracks):
-    """Create a playlist and add tracks to it"""
-    try:
-        if not user_token:
-            raise ValueError("No Spotify token provided")
-
-        # Create a Spotify client with user token
-        user_spotify = spotipy.Spotify(auth=user_token)
-        
-        # Verify token is valid by making a test request
-        try:
-            user_info = user_spotify.me()
-            user_id = user_info['id']
-        except Exception as e:
-            logger.error(f"Invalid Spotify token: {str(e)}")
-            raise ValueError("Invalid or expired Spotify token")
-        
-        # Create playlist
-        playlist_name = f"Recommended: {mood_description}"
-        playlist_description = f"AI-generated playlist based on: {mood_description}"
-        
-        playlist = user_spotify.user_playlist_create(
-            user_id,
-            name=playlist_name,
-            description=playlist_description,
-            public=True
+        logger.debug("Sending image to Hugging Face Inference API")
+        # Use Hugging Face Inference API for image analysis
+        response = hf_client.image_classification(
+            image,
+            model="microsoft/resnet-50"
         )
         
-        # Add tracks to playlist
-        track_uris = [track['external_url'].split('/')[-1] for track in tracks]
-        user_spotify.playlist_add_items(playlist['id'], track_uris)
-        
-        return {
-            'playlist_id': playlist['id'],
-            'playlist_url': playlist['external_urls']['spotify'],
-            'playlist_name': playlist_name
-        }
-    except ValueError as e:
-        logger.error(f"Validation error: {str(e)}")
-        raise
+        # Extract the top prediction
+        top_prediction = response[0]
+        logger.info(f"Image analysis result: {top_prediction['label']}")
+        return f"Image mood: {top_prediction['label']}"
     except Exception as e:
-        logger.error(f"Error creating playlist: {str(e)}")
+        logger.error(f"Error in image analysis: {str(e)}", exc_info=True)
         raise
 
-@app.route('/api/login', methods=['GET'])
-def login():
-    """Redirect to Spotify login page"""
-    auth_url = sp_oauth.get_authorize_url()
-    return jsonify({'auth_url': auth_url})
-
-@app.route('/api/callback', methods=['GET'])
-def callback():
-    """Handle Spotify callback"""
+def analyze_user_preferences(user_spotify):
+    """Analyze user's listening history and playlists to understand their preferences"""
     try:
-        code = request.args.get('code')
-        token_info = sp_oauth.get_access_token(code)
+        logger.info("Analyzing user preferences")
+        # Get user's top tracks
+        top_tracks = user_spotify.current_user_top_tracks(limit=20, time_range='medium_term')
+        top_artists = user_spotify.current_user_top_artists(limit=20, time_range='medium_term')
         
-        if 'error' in token_info:
-            return jsonify({'error': token_info['error']}), 400
-            
-        return jsonify({
-            'access_token': token_info['access_token'],
-            'refresh_token': token_info.get('refresh_token'),
-            'expires_in': token_info['expires_in']
-        })
+        # Get user's playlists
+        user_playlists = user_spotify.current_user_playlists(limit=50)
+        
+        # Get recently played tracks
+        recently_played = user_spotify.current_user_recently_played(limit=20)
+        
+        # Extract genres and artists
+        genres = set()
+        artists = set()
+        
+        # Analyze top artists
+        for artist in top_artists['items']:
+            genres.update(artist['genres'])
+            artists.add(artist['name'])
+        
+        # Analyze playlists
+        for playlist in user_playlists['items']:
+            try:
+                playlist_tracks = user_spotify.playlist_tracks(playlist['id'])
+                for item in playlist_tracks['items']:
+                    if item['track']:
+                        artists.add(item['track']['artists'][0]['name'])
+            except Exception as e:
+                logger.warning(f"Could not analyze playlist {playlist['name']}: {str(e)}")
+                continue
+        
+        # Analyze recently played
+        for item in recently_played['items']:
+            if item['track']:
+                artists.add(item['track']['artists'][0]['name'])
+        
+        logger.info(f"Found {len(genres)} genres and {len(artists)} artists")
+        return {
+            'genres': list(genres),
+            'artists': list(artists),
+            'top_tracks': [track['name'] for track in top_tracks['items']]
+        }
     except Exception as e:
-        logger.error(f"Error in callback: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error analyzing user preferences: {str(e)}", exc_info=True)
+        return None
+
+def clean_mood_description_for_spotify(description):
+    logger.debug(f"Cleaning mood description: {description}")
+    remove_phrases = [
+        "Based on the image content:", "captures this mood", "Image mood:", "Mood:",
+        "feeling:", "emotion:", "vibe:", "ambiance:", "atmosphere:", "Image:",
+    ]
+    for phrase in remove_phrases:
+        description = description.replace(phrase, "")
+    cleaned = " ".join(description.split()).strip()
+    logger.debug(f"Cleaned description: {cleaned}")
+    return cleaned
+
+def extract_filters(description):
+    logger.debug(f"Extracting filters from: {description}")
+    genres = ['rock', 'pop', 'jazz', 'classical', 'hip-hop', 'rap', 'edm',
+              'electronic', 'folk', 'country', 'blues', 'soul', 'r&b',
+              'metal', 'reggae', 'latin', 'indie', 'dance', 'alternative']
+    filters = []
+    search_terms = []
+
+    words = description.lower().replace('-', ' ').split()
+    for word in words:
+        if word in genres:
+            filters.append(f'genre:{word}')
+        elif word.isdigit() and 1900 <= int(word) <= 2100:
+            decade = int(word) - (int(word) % 10)
+            filters.append(f'year:{decade}-{decade+9}')
+        else:
+            search_terms.append(word)
+
+    result = ' '.join(search_terms), filters
+    logger.debug(f"Extracted filters: {result}")
+    return result
+
+def get_spotify_recommendations(mood_description, user_token=None, limit=10, mentioned_entity=None):
+    logger.info(f"Getting Spotify recommendations for: {mood_description}")
+    if mentioned_entity:
+        logger.info(f"Prioritizing recommendations based on mentioned entity: {mentioned_entity}")
+    
+    cleaned_description = clean_mood_description_for_spotify(mood_description)
+    base_terms, filters = extract_filters(cleaned_description)
+
+    if user_token:
+        sp = spotipy.Spotify(auth=user_token)
+        logger.debug("Using authenticated Spotify client")
+    else:
+        sp = spotipy.Spotify(client_credentials_manager=SpotifyClientCredentials())
+        logger.debug("Using app-only Spotify client")
+
+    # Helper function to build track dictionaries
+    def build_track(item):
+        return {
+            'name': item['name'],
+            'artist': item['artists'][0]['name'],
+            'album': item['album']['name'],
+            'preview_url': item['preview_url'],
+            'external_url': item['external_urls']['spotify'],
+            'popularity': item['popularity']
+        }
+    
+    # Helper function to log track details
+    def log_tracks(track_list):
+        for track in track_list:
+            logger.info(f"Recommended track: {track['name']} by {track['artist']} (Album: {track['album']}, Popularity: {track['popularity']})")
+
+    # If there's a mentioned entity, prioritize it in the search using a combined search query
+    if mentioned_entity:
+        combined_results = sp.search(q=mentioned_entity, type="artist,track", limit=limit)
+        artist_items = combined_results.get('artists', {}).get('items', [])
+        if artist_items:
+            artist = artist_items[0]
+            artist_id = artist['id']
+            logger.info(f"Found artist: {artist['name']} (ID: {artist_id})")
+            
+            # Get artist's top tracks
+            artist_top_tracks = sp.artist_top_tracks(artist_id)['tracks']
+            tracks = [build_track(item) for item in artist_top_tracks][:limit//2]
+            
+            try:
+                related_artists = sp.artist_related_artists(artist_id)['artists'][:2]
+                for related_artist in related_artists:
+                    related_tracks = sp.artist_top_tracks(related_artist['id'])['tracks']
+                    tracks.extend([build_track(item) for item in related_tracks][:limit//4])
+            except Exception as e:
+                logger.warning(f"Could not get related artists: {str(e)}")
+                more_tracks = sp.artist_top_tracks(artist_id)['tracks'][limit//2:limit]
+                tracks.extend([build_track(item) for item in more_tracks])
+            
+            # Remove duplicates and limit to requested size
+            tracks = list({track['name']: track for track in tracks}.values())[:limit]
+            logger.info(f"Found {len(tracks)} tracks based on artist and related artists")
+            log_tracks(tracks)
+            return tracks
+        else:
+            # If no artist found, try track search from combined results
+            track_items = combined_results.get('tracks', {}).get('items', [])
+            if track_items:
+                tracks = [build_track(item) for item in track_items]
+                # Get related tracks from the same artist
+                first_artist_id = track_items[0]['artists'][0]['id']
+                related_tracks = sp.artist_top_tracks(first_artist_id)['tracks'][:limit//2]
+                tracks.extend([build_track(item) for item in related_tracks])
+                
+                # Remove duplicates and limit to requested size
+                tracks = list({track['name']: track for track in tracks}.values())[:limit]
+                logger.info(f"Found {len(tracks)} tracks based on mentioned entity")
+                log_tracks(tracks)
+                return tracks
+
+    # If no mentioned entity or no results found, fall back to mood-based search
+    query = ' '.join(filters + base_terms.split())
+    logger.debug(f"Using mood-based search query: {query}")
+    
+    results = sp.search(q=query, type='track', limit=limit)
+    logger.info(f"Found {len(results['tracks']['items'])} tracks")
+    tracks = []
+    for item in results['tracks']['items']:
+        track_info = build_track(item)
+        tracks.append(track_info)
+
+    if not tracks and filters:
+        logger.info("No results with filters, trying without filters")
+        results = sp.search(q=base_terms, type='track', limit=limit)
+        tracks = [build_track(item) for item in results['tracks']['items']]
+        logger.info(f"Found {len(tracks)} tracks without filters")
+    
+    log_tracks(tracks)
+    return tracks
+
+def create_spotify_playlist(user_token, mood_description, tracks):
+    if not user_token:
+        logger.error("No Spotify token provided for playlist creation")
+        raise ValueError("No Spotify token provided")
+
+    logger.info(f"Creating playlist for mood: {mood_description}")
+    user_spotify = spotipy.Spotify(auth=user_token)
+
+    user_info = user_spotify.me()
+    user_id = user_info['id']
+    logger.debug(f"Creating playlist for user: {user_id}")
+
+    clean_description = clean_mood_description_for_spotify(mood_description)
+
+    playlist_name = f"Recommended: {clean_description}"
+    playlist_description = f"AI-generated playlist based on: {clean_description}"
+
+    playlist = user_spotify.user_playlist_create(
+        user_id,
+        name=playlist_name,
+        description=playlist_description,
+        public=True
+    )
+    logger.info(f"Created playlist: {playlist_name}")
+
+    track_uris = [track['external_url'].split('/')[-1] for track in tracks]
+    user_spotify.playlist_add_items(playlist['id'], track_uris)
+    logger.info(f"Added {len(track_uris)} tracks to playlist")
+
+    return {
+        'playlist_id': playlist['id'],
+        'playlist_url': playlist['external_urls']['spotify'],
+        'playlist_name': playlist_name
+    }
 
 @app.route('/api/recommend', methods=['POST'])
 def recommend():
     """Handle recommendation requests"""
     try:
-        data = request.json
-        logger.info(f"Received request with data: {data}")
+        data = request.get_json()
+        if not data:
+            logger.error("No JSON data provided in request")
+            return jsonify({'error': 'No JSON data provided'}), 400
+            
+        logger.info(f"Received recommendation request with data: {data}")
         
         if 'text_prompt' in data:
-            # Analyze text prompt
-            mood_description = analyze_text_prompt(data['text_prompt'])
+            # Analyze text prompt with user role if available
+            model_response = analyze_text_prompt(
+                data['text_prompt'],
+                user_role=data.get('user_role')
+            )
+            mood_description = model_response['mood_description']
+            mentioned_entity = model_response.get('mentioned_entity')
         elif 'image' in data:
-            # Analyze image
-            mood_description = analyze_image(data['image'])
+            # Decode base64 image
+            try:
+                image_data = base64.b64decode(data['image'])
+                mood_description = analyze_image(image_data)
+                model_response = None
+                mentioned_entity = None
+            except Exception as e:
+                logger.error(f"Error processing image: {str(e)}")
+                return jsonify({'error': 'Invalid image data'}), 400
         else:
+            logger.error("No input provided in request")
             return jsonify({'error': 'No input provided'}), 400
         
         # Get recommendations from Spotify
-        recommendations = get_spotify_recommendations(mood_description)
+        recommendations = get_spotify_recommendations(
+            mood_description, 
+            data.get('user_token'),
+            mentioned_entity=mentioned_entity
+        )
         
         response_data = {
             'mood_description': mood_description,
-            'recommendations': recommendations
+            'recommendations': recommendations,
+            'model_response': model_response
         }
         
-        # If user token is provided, create playlist
-        if 'user_token' in data and data['user_token']:
+        # Create playlist only if explicitly requested and user token is provided
+        if data.get('create_playlist', False) and 'user_token' in data and data['user_token']:
             try:
                 playlist_info = create_spotify_playlist(data['user_token'], mood_description, recommendations)
                 response_data['playlist'] = playlist_info
             except ValueError as e:
+                logger.error(f"Playlist creation error: {str(e)}")
                 return jsonify({'error': str(e)}), 401
             except Exception as e:
-                logger.error(f"Error creating playlist: {str(e)}")
+                logger.error(f"Error creating playlist: {str(e)}", exc_info=True)
                 return jsonify({'error': 'Failed to create playlist'}), 500
         
+        logger.info("Successfully generated recommendations")
         return jsonify(response_data)
     except Exception as e:
-        logger.error(f"Error in recommend endpoint: {str(e)}")
+        logger.error(f"Error in recommend endpoint: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
+    logger.debug("Health check endpoint called")
     return jsonify({'status': 'healthy'})
 
 if __name__ == '__main__':
-    # Get local IP address
-    hostname = socket.gethostname()
-    local_ip = socket.gethostbyname(hostname)
-    logger.info(f"Local IP address: {local_ip}")
-    
-    # Run the app
-    app.run(host='0.0.0.0', port=5001, debug=True) 
+    local_ip = socket.gethostbyname(socket.gethostname())
+    logger.info(f"Starting server on {local_ip}:5001")
+    app.run(host='0.0.0.0', port=5001, debug=True)
