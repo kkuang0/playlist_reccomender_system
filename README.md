@@ -64,13 +64,6 @@ npm start
 
 3. Open your browser and navigate to `http://localhost:3000`
 
-## Security Notes
-
-- Never commit your `.env` file or any files containing sensitive information
-- Keep your API keys and tokens secure
-- The `.env` file is already included in `.gitignore` to prevent accidental commits
-- For production deployment, use secure environment variable management systems
-
 ## Contributing
 
 1. Fork the repository
