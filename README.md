@@ -21,7 +21,7 @@ An AI-powered music playlist generator that creates personalized playlists based
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone github.com/kkuang0/playlist_reccomender_system.git
 cd playlist_recommender_system
 ```
 
@@ -74,6 +74,4 @@ npm start
 3. Make your changes
 4. Submit a pull request
 
-## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
