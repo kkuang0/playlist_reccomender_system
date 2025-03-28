@@ -5,10 +5,14 @@ An AI-powered music playlist generator that creates personalized playlists based
 ## Features
 
 - Generate music recommendations based on text descriptions
-- Analyze images to create mood-based playlists
 - Create and save playlists directly to Spotify
 - Preview tracks before adding them to playlists
+
+
+## In Process of Implementing
+- Analyze images to create mood-based playlists
 - Modern, responsive UI with drag-and-drop image upload
+- Improving prompting
 
 ## Prerequisites
 
